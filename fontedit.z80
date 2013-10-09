@@ -1,0 +1,754 @@
+; FONT-EDITOR v2.0
+;
+; For Spectrum 48K/128K/128K +2/+3/+2A
+;
+; Assemble with Hisoft's DEVPAC : A,2000
+;
+; Freeware 1994 by Thomas Kjaer, takjaer@daimi.aau.dk
+;
+; This font/sprite editor supports the following size of images:
+;
+; 8x8 bit=0	8x16 bit=1	16x8 bit=2	 16x16 bit=3
+;
+; byte 0	byte 0		byte 0  byte 1	 byte 0  byte 1
+; byte 1	byte 1		byte 2  byte 3	 byte 2  byte 3
+;  ....		 ....		 ....    ....	  ....    ....
+; byte 7	byte 15		byte 14 byte 15  byte 30 byte 31
+;
+; When copying chars from the rom, they will be expanded to match the
+; current size of the characters.
+; When returning to BASIC the BC-register contains the value :-
+; 65536*char_size+start_address_of_char_data
+;
+; e.g: LET A=USR xxxxx
+; and to get last used char size, use INT(A / 65536)
+; to get the start address, use A-65536*INT(A / 65536)
+;
+	ORG	#C000
+	ENT	$		; For testing with DEVPAC
+	JP	MAIN		; Skip data-area
+;
+; DATA AND VARIABLES
+;
+INK	EQU	#10
+PAPER	EQU	#11
+FLASH	EQU	#12
+BRIGHT	EQU	#13
+INVERS	EQU	#14
+OVER	EQU	#15
+AT	EQU	#16
+TAB	EQU	#17		; MISC CONTROL-CODES FOR PRINTING
+;
+CURCHR	DEFS	1		; The character we are working on
+CHRSZE	DEFS	1		; Current size of chars
+X_COOR	DEFS	1
+Y_COOR	DEFS	1		; The coordinates for editing cursor
+TMPSTO	DEFS	4*8		; For temporary store of a character
+GRIDDT	DEFB	#AA,#55,#AA,#55,#AA,#55,#AA,#55
+;
+; MAIN ENTRY
+;
+MAIN	CALL	INIT
+	CALL	MENU
+MAIN1	CALL	P_GRID		; Print char in the grid
+; Here starts the keyboard scanning
+MNKEYS	CALL	CURSON		; turn on cursor
+	LD	B,#05
+MDELAY	HALT
+	DJNZ	MDELAY
+	CALL	SB_SPC		; Scan keys b-space
+	BIT	1,A
+	PUSH	AF
+	CALL	Z,SSHIFT	; SYMBOL SHIFT pressed
+	POP	AF
+	CALL	K1_5		; Test the keys 1-5
+	CALL	K6_0		; Test the keys 6-0
+	CALL	MOVES		; Test for cursor movement keys
+	CP	#00
+	JR	Z,MNKEYS	; no moves, just jump back to go around again
+	PUSH	AF
+	CALL	CURSOF
+	POP	AF
+	BIT	5,A		; CAPS?
+;	JP	NZ,SCROLL
+; we can just test in one flow, since MOVES won't allow e.g O/P pressed
+; first check for SPACE
+	BIT	4,A
+	JR	Z,RIGHT
+	PUSH	AF
+	CALL	GET_IX
+	LD	B,#00
+	LD	A,(Y_COOR)
+	LD	C,A
+	LD	A,(CHRSZE)
+	BIT	1,A		; wide char?
+	JR	Z,THIN
+	SLA	C		; X2
+THIN	ADD	IX,BC
+	LD	A,(X_COOR)
+	CP	#00
+	JR	NZ,F_BIT
+	LD	A,#80
+	JR	XOR_PX		; now xor the pixel-value
+; now find the right bit
+F_BIT	BIT	3,A		; wide char?
+	JR	Z,F_BIT1
+	INC	IX		; 2nd column
+	SUB	#08
+	CP	#00
+	JR	NZ,F_BIT1
+	LD	A,#80
+	JR	XOR_PX
+F_BIT1	LD	B,A
+	LD	A,#80
+F_BIT2	RRA
+	DJNZ	F_BIT2
+XOR_PX	XOR	(IX+#00)	; xor this pixel value with previous
+	LD	(IX+#00),A
+	CALL	P_GRID
+	POP	AF
+RIGHT	LD	HL,X_COOR
+	BIT	0,A
+	JR	Z,LEFT		; not P=right
+	DEC	(HL)
+LEFT	BIT	1,A
+	JR	Z,UP		; not O=left
+	INC	(HL)
+UP	LD	HL,Y_COOR
+	BIT	2,A
+	JR	Z,DOWN		; not A=down
+	INC	(HL)
+DOWN	BIT	3,A
+	JR	Z,CHK_XY	; not Q=up
+	DEC	(HL)
+CHK_XY	CALL	SIZEBC
+	LD	A,(X_COOR)
+	CP	B
+	JR	NZ,CHK_X1
+	XOR	A
+	LD	(X_COOR),A	; wrap around when right edge reached
+CHK_X1	LD	A,(X_COOR)
+	CP	#FF
+	JR	NZ,CHK_Y
+	LD	A,B
+	SUB	#01
+	LD	(X_COOR),A
+CHK_Y	LD	A,(Y_COOR)
+	CP	C
+	JR	NZ,CHK_Y1
+	XOR	A
+	LD	(Y_COOR),A
+CHK_Y1	LD	A,(Y_COOR)
+	CP	#FF
+	JR	NZ,CHK_END
+	LD	A,C
+	SUB	#01
+	LD	(Y_COOR),A
+CHK_END	JP	MNKEYS
+;
+; This part test for the cursor movement keys and returns result in A
+; bit 	7	6	5	4	3	2	1	0
+; 			CAPS	SPACE	UP=Q	A=DOWN	O=LEFT	P=RIGHT
+;
+MOVES	LD	C,#00		; Reset movement result
+	CALL	SY_P
+	BIT	0,A		; P=right?
+	JR	NZ,MOVLFT
+	SET	1,C
+	JR	MOVUP		; P pressed so skip the test for left=O
+MOVLFT	BIT	1,A		; O=left?
+	JR	NZ,MOVUP
+	SET	0,C
+MOVUP	CALL	SQ_T
+	BIT	0,A		; Q=up?
+	JR	NZ,MOVDWN
+	SET	3,C
+	JR	MOVSPC		; Q pressed to skip the test for down=A
+MOVDWN	CALL	SA_G
+	BIT	0,A		; A=down?
+	JR	NZ,MOVSPC
+	SET	2,C
+MOVSPC	CALL	SB_SPC
+	BIT	0,A		; SPACE pressed?
+	JR	NZ,MOVCPS
+	SET	4,C
+	JR	MOVEND		; SPACE pressed so skip the test for CAPS
+MOVCPS	CALL	SCS_V
+	BIT	0,A		; CAPS pressed?
+	JR	NZ,MOVEND
+	SET	5,C
+MOVEND	LD	A,C		; return result in A
+	RET
+;
+; This part handles the symbol shift functions
+;
+SSHIFT	CALL	SQ_T
+	BIT	2,A
+	JP	Z,ASCM8		; 'SS+E' = ASCII - 8
+	BIT	3,A
+	JP	Z,ASCM1		; 'SS+R' = ASCII - 1
+	BIT	4,A
+	JP	Z,ASCP1		; 'SS+T' = ASCII + 1
+	CALL	SY_P
+	BIT	4,A
+	JP	Z,ASCP8		; 'SS+Y' = ASCII + 8
+	RET
+; This part tests the keys 1-5 for action
+K1_5	CALL	S1_5
+	BIT	0,A
+	JP	Z,CLEAR		; '1' = CLEAR
+	BIT	1,A
+	JP	Z,INV		; '2' = INVERSE
+	BIT	2,A		; '3' = FLIP VERTICAL
+	BIT	3,A		; '4' = FLIP HORIZONTAL
+	BIT	4,A		; '5' = STORE
+	JP	Z,STORE
+	RET
+; This part tests the keys 6-0 for action
+K6_0	CALL	S6_0		; Scan the keys 6-0
+	BIT	0,A
+	JP	Z,ENDING
+	BIT	1,A
+	JP	Z,CHGSZE	; If '9' pressed change char size
+	BIT	2,A		; '8' = ALL CHARS FROM ROM
+	JP	Z,RCHARS
+	BIT	3,A		; '7' = CURRENT CHAR FROM ROM
+	JP	Z,R_CHR
+	BIT	4,A		; '6' = GET FROM TEMPORARY STORE
+	JP	Z,GET
+	RET
+;
+; ASCII +/- 8/1
+;
+ASCP8	LD	A,(CURCHR)
+	ADD	A,#08
+ASCP8A	CP	#80
+	JR	C,ASCP8E
+	SUB	#60
+ASCP8E	JR	ASCM8E
+;
+ASCM8	LD	A,(CURCHR)
+	SUB	#08
+ASCM8A	CP	#20
+	JR	NC,ASCM8E
+	ADD	A,#60
+ASCM8E	LD	(CURCHR),A
+	CALL	P_GRID
+	CALL	LOWCHR
+	RET
+;
+ASCP1	LD	A,(CURCHR)
+	INC	A
+	JR	ASCP8A
+;
+ASCM1	LD	A,(CURCHR)
+	DEC	A
+	JR	ASCM8A
+;
+; CLEAR THE GRID AND THE CHAR
+;
+CLEAR	CALL	ADRSZE		; IX=address of char, BC=number of bytes
+	PUSH	IX
+	POP	HL
+	LD	E,L
+	LD	D,H
+	INC	DE
+	DEC	BC
+	LD	(HL),#00
+	LDIR
+	CALL	P_GRID
+	RET
+;
+; INVERSE THE CURRENT CHAR
+;
+INV	CALL	ADRSZE		; IX=address of char, BC=number of bytes
+	LD	B,C		; use B as counter
+INVLOP	LD	A,(IX+#00)
+	XOR	#FF
+	LD	(IX+#00),A
+	INC	IX
+	DJNZ	INVLOP
+	CALL	P_GRID
+	RET
+;
+; STORES CURRENT CHAR IN TEMPORARY MEMORY
+;
+STORE	CALL	ADRSZE
+	PUSH	IX
+	POP	HL
+	LD	DE,TMPSTO
+	LDIR
+; and show what's in the temporary store
+STORE1	CALL	SIZEBC
+	LD	IX,TMPSTO
+	LD	HL,#407E
+	CALL	P_CHR0
+	RET
+;
+; RETRIEVE FROM TEMPORARY STORE TO CURRENT CHAR
+;
+GET	CALL	ADRSZE
+	PUSH	IX
+	POP	DE
+	LD	HL,TMPSTO
+	LDIR
+	CALL	P_GRID
+	RET
+;
+; GET ALL CHARS FROM ROM
+;
+RCHARS	LD	E,#20
+RCHAR0	LD	A,E
+	CALL	GET_I1
+	LD	A,E
+	PUSH	DE
+	CALL	R_CHRX
+	POP	DE
+	INC	E
+	JP	P,RCHAR0
+	CALL	P_GRID
+	CALL	LOWCHR
+	RET
+;
+; GET CURRENT CHAR FROM THE ROM
+;
+R_CHR	CALL	GET_IX
+	LD	A,(CURCHR)
+R_CHRX	SUB	#20
+	LD	H,#00
+	LD	L,A
+	ADD	HL,HL
+	ADD	HL,HL
+	ADD	HL,HL		; HL=addr in ROM
+	LD	BC,#3D00
+	ADD	HL,BC
+	CALL	SIZEBC
+	LD	B,C		; Use B as height counter
+R_CHR0	LD	C,#02		; Use C as 'height' counter
+R_CHRA	LD	E,(HL)
+	LD	A,(CHRSZE)
+	BIT	1,A		; wide?
+	JR	Z,R_CHR5	; no
+	PUSH	BC
+	LD	C,#02		; Use C as nibble counter
+R_CHR1	LD	B,#04		; 4 pixels at a time in ROM char
+	XOR	A
+R_CHR2	RLC	E		; high bit E into CARRY
+	JR	NC,R_CHR3	; not set
+	RLA			; CARRY into low bit A
+	SCF
+	RLA			; and once more
+	JR	R_CHR4
+R_CHR3	SLA	A
+	SLA	A		; fill with 2 zero bits
+R_CHR4	DJNZ	R_CHR2
+	LD	(IX+#00),A
+	INC	IX
+	DEC	C
+	JR	NZ,R_CHR1	; jump back for last 4 pixels, if neccesary
+	POP	BC
+	JR	R_CHR6		; continue for tall char
+; single width char
+R_CHR5	LD	(IX+#00),E	; 8 bits wide, just store it
+	INC	IX
+R_CHR6	LD	A,(CHRSZE)
+	BIT	0,A		; tall char?
+	JR	Z,R_CHR7
+	DEC	C
+	JR	NZ,R_CHRA
+R_CHR7	INC	HL
+	DJNZ	R_CHR0
+	CALL	P_GRID
+	RET
+;
+; CHANGE SIZE OF THE CHARS BY CYCLING THROUGH THE SIZES
+;
+CHGSZE	LD	A,(CHRSZE)
+	INC	A
+	AND	%00000011	; Preserve lower 2 bits
+	LD	(CHRSZE),A
+	CALL	MENU
+	CALL	P_GRID
+	XOR	A
+	LD	(X_COOR),A
+	LD	(Y_COOR),A	; reset cursor pos.
+	RET
+;
+; RETURNS TO BASIC
+;
+ENDING	POP	HL		; Skip return address
+	RET			; If '0' pressed then return to basic
+;
+; FINDS THE IX=ADDRESS OF CURRENT CHAR & BC=SIZE IN BYTES
+;
+ADRSZE	CALL	GET_IX
+	LD	BC,#0008
+	LD	A,(CHRSZE)
+	BIT	0,A
+	JR	Z,ADRSZ1
+	SLA	C		; high char
+ADRSZ1	BIT	1,A
+	JR	Z,ADRSZ2
+	SLA	C		; wide char
+ADRSZ2	RET
+;
+; These functions turns the editing cursor on/off
+;
+CURSON	CALL	ATTADR
+	SET	7,(HL)		; turn on flash of that square
+	RET
+CURSOF	CALL	ATTADR
+	RES	7,(HL)		; turn off flash of that square
+	RET
+;
+; returns the attribute address for current x,y in HL
+;
+ATTADR	LD	A,(X_COOR)
+	ADD	A,#01
+	LD	C,A
+	LD	A,(Y_COOR)
+	ADD	A,#03
+	LD	B,A
+	LD	A,B
+	SRA	A
+	SRA	A
+	SRA	A
+	ADD	A,#58
+	LD	H,A
+	LD	A,B
+	AND	#07
+	RRCA
+	RRCA
+	RRCA
+	ADD	A,C
+	LD	L,A
+	RET
+;
+; INITALIZE SOME VARIABLES
+;
+INIT	LD	A,#20
+	LD	(CURCHR),A	; Start with editing 'SPACE'
+	XOR	A
+	LD	(X_COOR),A
+	LD	(Y_COOR),A	; Reset the cursor position
+	LD	(CHRSZE),A	; Use size 0=8x8 bit
+	LD	HL,GRIDDT	; Do the grid pattern
+	LD	B,#04
+INIT1	LD	(HL),#AA
+	INC	HL
+	LD	(HL),#55
+	INC	HL
+	DJNZ	INIT1		; We now have the 'grey' pattern in TMPSTO
+	RET
+;
+; SHOW THE MAIN SCREEN
+;
+MENU	CALL	#0DAF		; CL_ALL, CLEAR SCREEN
+	LD	A,#02
+	CALL	#1601		; OPEN "S" CHANNEL
+; Title message
+	CALL	PRINTM
+	DEFB	AT, #00, #08
+	DEFM	"FONT-EDITOR v1.0"
+	DEFB	AT, #01, #06
+	DEFM	"(p)-94 Thomas Kjae"
+	DEFB	"r"+#80
+; Menu options
+	CALL	PRINTM
+	DEFB	AT, #06, #12
+	DEFM	"OPQA:Movement"
+	DEFB	AT, #07, #12
+	DEFM	"SPC :Set/Reset"
+	DEFB	AT, #08, #12
+	DEFM	"1:Clr  2:Inv"
+	DEFB	AT, #09, #12
+	DEFM	"3:FlpV 4:FlpH"
+	DEFB	AT, #0A, #12
+	DEFM	"5:Sto  6:Get"
+	DEFB	AT, #0B, #12
+	DEFM	"7:Rom  8:Roms"
+	DEFB	AT, #0C, #12
+	DEFM	"9:Size 0:End"
+	DEFB	AT, #0D, #12
+	DEFM	"CAPS:-"
+	DEFB	AT, #0E, #12
+	DEFM	"OPQA:Roll char"
+	DEFB	AT, #0F, #12
+	DEFM	"SYMB SHIFT:-"
+	DEFB	AT, #10, #12
+	DEFM	"OPQA:Roll line"
+	DEFB	AT, #11, #12
+	DEFM	"R/T :Ascii +/-"
+	DEFB	AT, #12, #12
+	DEFM	"E/Y : '' +/- "
+	DEFB	"8"+#80
+; Misc info
+	CALL	PRINTM
+	DEFB	AT, #03, #15
+	DEFM	"ASCII  M"
+	DEFB	":"+#80
+; Draw the grid, at the right size
+	CALL	SIZEBC		; Get size of char
+; B=width, C=height
+MGRID	LD	HL,#5861	; Upper left corner of grid on screen
+	LD	DE,GRIDDT	; Where to find the grid pattern
+MENUG1	PUSH	BC
+; Do one line
+	PUSH	HL
+	LD	A,(DE)		; Fetch from pattern
+MENUG2	BIT	7,A		; What to do?
+	LD	(HL),#3C	; Well, first draw something
+	JR	NZ,MENUG3
+	RES	6,(HL)		; If the bit was 0, then no bright
+	JR	MENUG4
+MENUG3	SET	6,(HL)		; ELSE bright on, for this square
+MENUG4	RLCA			; rotate bit pattern
+	INC	HL		; Next screen square in the line
+	DJNZ	MENUG2		; repeat for rest of line
+; Find addr of next screen position
+	POP	HL		; Retrieve old start position
+	LD	BC,#0020
+	ADD	HL,BC
+	POP	BC		; Retrieve counter
+	INC	DE		; Next byte in pattern
+	LD	A,C
+	CP	#09		; Reset pattern pointer?
+	JR	NZ,MENUG5
+	LD	DE,GRIDDT	; Yes
+MENUG5	DEC	C		; Update height counter
+	JR	NZ, MENUG1	; If not finished, do next line
+; Draw attribute box around current character
+	LD	A,#30		; Yellow paper
+	LD	HL,#5A8E	; Upper bar
+	LD	(HL),A
+	INC	L
+	LD	(HL),A
+	INC	L
+	LD	(HL),A
+	INC	L
+	LD	(HL),A
+	LD	HL,#5AAE	; the sides
+	LD	(HL),A
+	INC	L
+	INC	L
+	INC	L
+	LD	(HL),A
+	LD	HL,#5ACE
+	LD	(HL),A
+	INC	L
+	INC	L
+	INC	L
+	LD	(HL),A
+	LD	HL,#5AEE	; Lower bar
+	LD	(HL),A
+	INC	L
+	LD	(HL),A
+	INC	L
+	LD	(HL),A
+	INC	L
+	LD	(HL),A
+; and print the chars below
+	CALL	LOWCHR
+; and the char in temporary store
+	CALL	STORE1
+	RET
+;
+; PRINT CURRENT CHAR IN THE GRID AND INFORM USER OF CURRENT ASCII NUMBER
+;
+P_GRID	CALL	GET_IX		; Fetch address of current char
+	CALL	SIZEBC		; Get size of char
+; B=width, C=Height
+PRTGRD	LD	HL,#5861	; Upper left corner of grid on screen
+PGRID0	PUSH	BC
+; Do one line
+	PUSH	HL		; Save screen position
+PGRID1	LD	E,(IX+#00)	; Fetch from char
+PGRID2	LD	A,(HL)		; Get current attribute of pixel
+	AND	#47		; Preserve BRIGHT and INK, and use black PAPER
+	BIT	7,E		; What does the char data says?
+	JR	NZ,PGRID3	; The bit was set, so jump
+	XOR	#38		; Reset bit=WHITE PAPER
+PGRID3	LD	(HL),A		; Store new attribute
+	INC	HL		; next pixel
+	RLC	E		; rotate bit pattern
+	LD	A,B
+	CP	9		; Check for wide char
+	JR	NZ,PGRID4
+	INC	IX		; Next column in the wide char
+	DEC	B		; update width counter
+	JR	PGRID1		; and jump back to fetch data for column
+PGRID4	DJNZ	PGRID2		; repeat for rest of line
+; Find addr of next screen position
+	POP	HL		; Retrieve old start position
+	LD	BC,#0020
+	ADD	HL,BC
+	POP	BC		; Retrieve counter
+	INC	IX		; Next byte in pattern
+	DEC	C
+	JR	NZ,PGRID0	; If not finished, do next line
+; Show current ascii number and 'Spectrum' character
+	LD	A,(CURCHR)
+	LD	(PRT_NO),A
+	CALL	#2D28		; STACK-A
+	CALL	PRINTM
+	DEFB	AT, #4, #15
+	DEFM	"   ="
+PRT_NO	DEFB	#00, AT, #4, #15+#80
+	CALL	#2DE3		; PRINT-A
+; Show current char in full size
+	LD	HL,#4072
+	LD	A,(CURCHR)
+	CALL	P_CHAR		; print char to the right of the grid
+	LD	A,(CURCHR)
+	LD	HL,#50AF	; print char in the frame
+	CALL	P_CHAR
+	RET
+;
+; HERE COMES THE KEY-SCANNING ROUTINES
+;
+S1_5	LD	A,#F7
+	JR	S_IN		; Scan keys 1-0
+S6_0	LD	A,#EF
+	JR	S_IN		; Scan keys 6-0
+SQ_T	LD	A,#FB
+	JR	S_IN		; Scan keys q-t
+SY_P	LD	A,#DF
+	JR	S_IN		; Scan keys y-p
+SA_G	LD	A,#FD
+	JR	S_IN		; Scan keys a-g
+SH_ENT	LD	A,#BF
+	JR	S_IN		; Scan keys h-enter
+SCS_V	LD	A,#FE
+	JR	S_IN		; Scan keys caps-v
+SB_SPC	LD	A,#7F		; Scan keys b-space
+S_IN	IN	A,(#FE)
+	RET
+;
+; PRINT THE CHAR IN 'A' AT ADDRESS 'HL' IN D_FILE
+;
+P_CHAR	PUSH	HL
+	CALL	GET_I1
+	CALL	SIZEBC		; Get size in BC
+	POP	HL		; Now HL=d_file, BC=size, IX=address
+;
+P_CHR0	PUSH	HL		; Save d_file address
+	LD	A,(IX+#00)	
+	LD	(HL),A
+	LD	A,B
+	SUB	#08		; width = width - 8
+	CP	#08		; Check for wide chars
+	JR	NZ,P_CHR1
+	INC	HL
+	INC	IX
+	LD	A,(IX+#00)
+	LD	(HL),A		; 2nd column in wide chars
+P_CHR1	INC	IX
+	POP	HL
+; calculate address for next row in d_file
+	INC	H
+	LD	A,H
+	AND	#07
+	JR	NZ,P_CHR2
+	LD	A,L
+	ADD	A,#20
+	LD	L,A
+	JR	C,P_CHR2
+	LD	A,H
+	SUB	#08
+	LD	H,A
+P_CHR2	LD	A,C
+	DEC	C
+	JR	NZ,P_CHR0	; Do all rows
+	RET	
+;
+; SHOWS SOME CHARS AT THE LOWER LINES
+;
+LOWCHR	LD	A,(CURCHR)	; Starting char is
+	SUB	#05		; 5 Chars to the left of current
+	CP	32		; Below 32?
+	JR	NC,LOWCH1	; No, so continue
+	ADD	A,#60		; Yep, so add 96 to starting char
+LOWCH1	LD	B,#0B		; Show 11 chars
+	LD	HL,#50A0	; Starting address in D_FILE for first char
+LOWCH2	PUSH	AF
+	PUSH	HL
+	PUSH	BC
+	CALL	P_CHAR
+	POP	BC
+	POP	HL
+	POP	AF
+	INC	HL
+	INC	HL
+	INC	HL
+	INC	A
+	CP	#80
+	JR	NZ,LOWCH3
+	LD	A,#20
+LOWCH3	DJNZ	LOWCH2
+	RET
+;
+; FIND SIZE OF CHAR, RETURN WITH BC=WIDTH, HEIGHT
+;
+SIZEBC	LD	A,(CHRSZE)	; What size?
+	CP	#03		; 16x16 bit?
+	LD	BC,#1010	
+	RET	Z		; Yep, so return
+	CP	#02		; 16x8 bit?
+	LD	BC,#1008
+	RET	Z		; Yep, so return
+	CP	#01		; 8x16 bit?
+	LD	BC,#0810
+	RET	Z		; Yep, so return
+	LD	BC,#0808	; Well then it must be 8x8 bit	
+	RET
+;
+; Fetch addr of current char, return address in IX
+;
+GET_IX	LD	A,(CURCHR)
+GET_I1	SUB	#20		; Starts with space
+	LD	L,A
+	LD	H,#00
+	LD	A,(CHRSZE)
+	CP	#00		; 8X8?
+	JR	Z,GET8		; YEP, multiply with 8
+	CP	#01		; 8x16?
+	JR	Z,GET16		; YEP, multiply with 16
+	CP	#02		; 16X16?
+	JR	Z,GET16		; YEP, multiply with 16
+; well then it must be 16x16, and then multiply with 32 		
+GET32	ADD	HL,HL		; For Ax32, size 3
+GET16	ADD	HL,HL		; For Ax16, size 2 & 1
+GET8	ADD	HL,HL		; For Ax8,  size 0
+	ADD	HL,HL		; x4
+	ADD	HL,HL		; x2
+	LD	B,H
+	LD	C,L
+	LD	IX,FONT		; BASE ADDR FOR SPACE
+	ADD	IX,BC
+	RET
+;
+; PRINT A MESSAGE, LAST CHARACTER WITH BIT 7=1 
+; IS CALLED THIS WAY:  CALL     PRINTM
+;                      DEFM     "Message"
+;                      DEFB     "s"+#80
+;                      CODE CONTINUES HERE
+;
+PRINTM	POP	DE		; RETURN ADDRESS=TEXT
+PRTCHR	LD	A,(DE)		; GET CHAR. TO PRINT
+	AND	%01111111	; MASK OUT EVENTUALLY HIGH-BIT
+        RST	#10		; AND PRINT IT
+        LD	A,(DE)		; WAS BIT-8 SET?
+        BIT	7,A
+	JR	NZ,PRTRET	; YES, SO JUMP TO END
+        INC	DE		; UPDATE TEXT-POINTER
+        JR	PRTCHR
+PRTRET	INC	DE		; DE=ADDRESS OF PROGRAM CONTINUATION
+        PUSH	DE
+	RET			; RETURN
+;
+; Place the font-data after the code
+;
+FONT	
+; EQU	#3D00
+	DEFB	#55,#AA,#55,#AA,#55,#AA,#55,#AA
+	DEFB	#FF,#81,#81,#81,#81,#81,#81,#FF
